@@ -47,6 +47,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"regexp"
@@ -57,7 +58,10 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-const secondsPerDay = 86400
+const (
+	secondsPerDay = 86400
+	maxTokenBytes = 64 * 1024
+)
 
 var commentPrefixRe = regexp.MustCompile(`^autoban:(\d+)$`)
 
@@ -281,13 +285,40 @@ func parseEpochNs(comment string) (int64, bool) {
 	return ns, true
 }
 
-func deleteAddress(c *apiClient, name string) {
+// readToken either returns the explicitly supplied token or reads it from
+// standard input. The latter keeps the secret out of the process command line,
+// which is useful when the program is launched by Task Scheduler.
+func readToken(token string, fromStdin bool, stdin io.Reader) (string, error) {
+	if !fromStdin {
+		return token, nil
+	}
+	if token != "" {
+		return "", fmt.Errorf("use either -token or -token-stdin, not both")
+	}
+
+	input, err := io.ReadAll(io.LimitReader(stdin, maxTokenBytes+1))
+	if err != nil {
+		return "", fmt.Errorf("read token from standard input: %w", err)
+	}
+	if len(input) > maxTokenBytes {
+		return "", fmt.Errorf("token from standard input exceeds %d bytes", maxTokenBytes)
+	}
+
+	token = strings.TrimSpace(string(input))
+	if token == "" {
+		return "", fmt.Errorf("token from standard input is empty")
+	}
+	return token, nil
+}
+
+func deleteAddress(c *apiClient, name string) bool {
 	status, body, err := c.do("DELETE", "firewall/address/"+name, nil)
 	if err != nil || status != 200 {
 		fmt.Fprintf(&out, "  %s %s -- %s\n", failStyle.Render("[FAIL]"), name, summarizeError(status, body, err))
-		return
+		return false
 	}
 	fmt.Fprintf(&out, "  %s %s\n", okStyle.Render("[DELETED]"), name)
+	return true
 }
 
 // summarizeError turns a failed API response into a short, actionable
@@ -336,19 +367,29 @@ func summarizeError(status int, body []byte, err error) string {
 func main() {
 	host := flag.String("host", "", "FortiGate management IP or hostname (required)")
 	port := flag.Int("port", 443, "FortiGate admin HTTPS port (default: 443)")
-	token := flag.String("token", "", "FortiGate REST API token (required)")
+	token := flag.String("token", "", "FortiGate REST API token")
+	tokenStdin := flag.Bool("token-stdin", false, "Read FortiGate REST API token from standard input")
 	group := flag.String("group", "admin-failed-login", "Address group name to age-expire")
 	days := flag.Float64("days", 7, "Age threshold in days before an autoban: entry expires")
 	dryRun := flag.Bool("dry-run", false, "Show what would change, make no changes")
 	insecure := flag.Bool("insecure", true, "Skip TLS verification (default true, self-signed FortiGate certs)")
 	flag.Parse()
 
-	if *host == "" || *token == "" {
-		fmt.Println("Usage: expire_autoban -host <ip> -token <api_token> [-port 443] [-group admin-failed-login] [-days 7] [-dry-run]")
+	resolvedToken, err := readToken(*token, *tokenStdin, os.Stdin)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ERROR: %s\n", err)
+		os.Exit(1)
+	}
+	if *host == "" || resolvedToken == "" {
+		fmt.Println("Usage: expire_autoban -host <ip> (-token <api_token> | -token-stdin) [-port 443] [-group admin-failed-login] [-days 7] [-dry-run]")
+		os.Exit(1)
+	}
+	if math.IsNaN(*days) || math.IsInf(*days, 0) || *days < 0 {
+		fmt.Fprintln(os.Stderr, "ERROR: -days must be a finite number greater than or equal to 0.")
 		os.Exit(1)
 	}
 
-	client := newAPIClient(*host, *port, *token, *insecure)
+	client := newAPIClient(*host, *port, resolvedToken, *insecure)
 	thresholdSeconds := *days * secondsPerDay
 	now := time.Now().Unix()
 
@@ -448,6 +489,7 @@ func main() {
 		fmt.Fprintln(&out, tableBoxStyle.Render(strings.Join(tableLines, "\n")))
 	}
 
+	deleteFailures := 0
 	if !*dryRun && len(toDelete) > 0 {
 		newMemberJSON, _ := json.Marshal(map[string]any{"member": keepMembers})
 		status, body, err := client.do("PUT", "firewall/addrgrp/"+*group, newMemberJSON)
@@ -458,7 +500,9 @@ func main() {
 		fmt.Fprintf(&out, "\n%s Group '%s' updated, %d %s removed:\n", okStyle.Render("[OK]"), *group, len(toDelete), plural(len(toDelete), "member", "members"))
 
 		for _, name := range toDelete {
-			deleteAddress(client, name)
+			if !deleteAddress(client, name) {
+				deleteFailures++
+			}
 		}
 	}
 
@@ -475,7 +519,13 @@ func main() {
 	if warnCount > 0 {
 		summary = append(summary, "warnings:", fmt.Sprintf("%d (see warn rows above)", warnCount))
 	}
+	if deleteFailures > 0 {
+		summary = append(summary, "delete failures:", strconv.Itoa(deleteFailures))
+	}
 	fmt.Fprintln(&out, kvBox(summary...))
 
 	fmt.Println(boxWithTitle("Ban expiration", strings.Split(strings.TrimRight(out.String(), "\n"), "\n")...))
+	if deleteFailures > 0 {
+		os.Exit(1)
+	}
 }

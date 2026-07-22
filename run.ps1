@@ -1,16 +1,55 @@
 param(
-    [string]$Token  = $env:FGT_TOKEN,
     [string]$FgtHost = "10.0.40.1",
     [int]$Port      = 52920,
     [int]$Days      = 20,
+    [string]$TokenFile = (Join-Path $PSScriptRoot "fgt-token.dpapi"),
     [switch]$Apply
 )
 
-if (-not $Token) { throw "No token. Pass -Token <t> or set `$env:FGT_TOKEN" }
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+$exitCode = 1
+$bstr = [IntPtr]::Zero
+$secureToken = $null
+$plainToken = $null
 
-$exe  = Join-Path $PSScriptRoot "expire_autoban.exe"
-$args = @("-host", $FgtHost, "-port", $Port, "-token", $Token, "-days", $Days)
-if (-not $Apply) { $args += "-dry-run" }
+try {
+    $exe = Join-Path $PSScriptRoot "expire_autoban.exe"
+    if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
+        throw "Executable not found: $exe"
+    }
+    if (-not (Test-Path -LiteralPath $TokenFile -PathType Leaf)) {
+        throw "DPAPI token file not found: $TokenFile"
+    }
 
-& $exe @args
-exit $LASTEXITCODE
+    $secureToken = Get-Content -LiteralPath $TokenFile -Raw | ConvertTo-SecureString
+    $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureToken)
+    $plainToken = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+    if ([string]::IsNullOrWhiteSpace($plainToken)) {
+        throw "DPAPI token file decrypted to an empty value."
+    }
+
+    $cliArgs = @("-host", $FgtHost, "-port", $Port, "-days", $Days, "-token-stdin")
+    if (-not $Apply) { $cliArgs += "-dry-run" }
+
+    $plainToken | & $exe @cliArgs
+    $exitCode = $LASTEXITCODE
+    if ($null -eq $exitCode) {
+        $exitCode = 1
+    }
+}
+catch {
+    [Console]::Error.WriteLine("ERROR: " + $_.Exception.Message)
+    $exitCode = 1
+}
+finally {
+    if ($bstr -ne [IntPtr]::Zero) {
+        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+    }
+    if ($null -ne $secureToken) {
+        $secureToken.Dispose()
+    }
+    $plainToken = $null
+}
+
+exit $exitCode
