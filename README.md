@@ -15,16 +15,28 @@ go build -o expire_autoban .          # Linux/macOS
 GOOS=windows GOARCH=amd64 go build -o expire_autoban.exe .   # Windows
 ```
 
+Native PowerShell build:
+
+```powershell
+$env:GOOS = 'windows'; $env:GOARCH = 'amd64'; go build -o expire_autoban.exe .
+```
+
 Use `-o` to choose the executable name and location.
 
 ## Run
 
 ```sh
+# Use the FortiGate management IP or hostname for your environment.
+FORTIGATE_HOST=192.0.2.10
+
 # preview, changes nothing
-./expire_autoban -host 172.20.20.159 -token $TOKEN -days 7 -dry-run
+./expire_autoban -host "$FORTIGATE_HOST" -token "$TOKEN" -days 7 -dry-run
 
 # do it
-./expire_autoban -host 172.20.20.159 -token $TOKEN -days 7
+./expire_autoban -host "$FORTIGATE_HOST" -token "$TOKEN" -days 7
+
+# read the token from standard input instead of passing it as an argument
+printf '%s\n' "$TOKEN" | ./expire_autoban -host "$FORTIGATE_HOST" -token-stdin -days 7 -dry-run
 ```
 
 ## Flags
@@ -36,7 +48,7 @@ Use `-o` to choose the executable name and location.
 | `-token-stdin` | `false` | read the REST API token from standard input |
 | `-port` | `443` | admin HTTPS port |
 | `-group` | `admin-failed-login` | address group to expire |
-| `-days` | `7` | age threshold |
+| `-days` | `7` | age threshold; must be finite and greater than or equal to `0` |
 | `-dry-run` | `false` | show what would change |
 | `-insecure` | `true` | skip TLS verify (self-signed certs) |
 
@@ -63,7 +75,7 @@ computer. Restrict the token-file directory to the task account and
 administrators. Configure the task to run `powershell.exe` with:
 
 ```text
--NoProfile -NonInteractive -File "C:\Path\To\CleanupAutoban\run.ps1" -Apply
+-NoProfile -NonInteractive -File "C:\Path\To\CleanupAutoban\run.ps1" -FgtHost 192.0.2.10 -Port 443 -Days 7 -Apply
 ```
 
 Omit `-Apply` for a dry-run. Use a full path to `run.ps1` if the project lives
