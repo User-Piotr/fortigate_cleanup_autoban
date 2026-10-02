@@ -225,8 +225,8 @@ func newAPIClient(host string, port int, token string, insecure bool) *apiClient
 	}
 }
 
-func (c *apiClient) do(method, path string, body []byte) (int, []byte, error) {
-	url := fmt.Sprintf("https://%s:%d/api/v2/cmdb/%s", c.host, c.port, path)
+func (c *apiClient) doAPI(method, apiPath string, body []byte) (int, []byte, error) {
+	url := fmt.Sprintf("https://%s:%d/api/v2/%s", c.host, c.port, apiPath)
 	var reqBody io.Reader
 	if body != nil {
 		reqBody = bytes.NewReader(body)
@@ -251,6 +251,14 @@ func (c *apiClient) do(method, path string, body []byte) (int, []byte, error) {
 		return 0, nil, err
 	}
 	return resp.StatusCode, respBody, nil
+}
+
+func (c *apiClient) do(method, path string, body []byte) (int, []byte, error) {
+	return c.doAPI(method, "cmdb/"+path, body)
+}
+
+func (c *apiClient) doMonitor(method, path string, body []byte) (int, []byte, error) {
+	return c.doAPI(method, "monitor/"+path, body)
 }
 
 // groupNames lists every address group on the box. Only used to make a
@@ -372,6 +380,7 @@ func main() {
 	group := flag.String("group", "admin-failed-login", "Address group name to age-expire")
 	days := flag.Float64("days", 7, "Age threshold in days before an autoban: entry expires")
 	dryRun := flag.Bool("dry-run", false, "Show what would change, make no changes")
+	saveIfNeeded := flag.Bool("save-if-needed", false, "Persist config after a successful run when cfg-save is manual or revert")
 	insecure := flag.Bool("insecure", true, "Skip TLS verification (default true, self-signed FortiGate certs)")
 	flag.Parse()
 
@@ -381,7 +390,7 @@ func main() {
 		os.Exit(1)
 	}
 	if *host == "" || resolvedToken == "" {
-		fmt.Println("Usage: expire_autoban -host <ip> (-token <api_token> | -token-stdin) [-port 443] [-group admin-failed-login] [-days 7] [-dry-run]")
+		fmt.Println("Usage: expire_autoban -host <ip> (-token <api_token> | -token-stdin) [-port 443] [-group admin-failed-login] [-days 7] [-dry-run] [-save-if-needed]")
 		os.Exit(1)
 	}
 	if math.IsNaN(*days) || math.IsInf(*days, 0) || *days < 0 {
@@ -466,6 +475,17 @@ func main() {
 		}
 	}
 
+	// Verify access and the returned mode before making any changes. The mode
+	// is read again immediately before saving so a concurrent mode change is
+	// handled using the current value.
+	saveRequested := !*dryRun && *saveIfNeeded && len(toDelete) > 0
+	if saveRequested {
+		if _, err := client.cfgSaveMode(); err != nil {
+			fmt.Fprintf(os.Stderr, "ERROR: configuration save preflight: %s\n", err)
+			os.Exit(1)
+		}
+	}
+
 	// --- render, in display order: dry-run note -> PARAMETERS -> STATUS -> apply -> SUMMARY ---
 
 	if *dryRun {
@@ -476,10 +496,15 @@ func main() {
 		}
 	}
 
+	savePolicy := "disabled"
+	if *saveIfNeeded {
+		savePolicy = "if needed"
+	}
 	banner("PARAMETERS")
 	fmt.Fprintln(&out, kvBox(
 		"group:", *group,
 		"age:", fmt.Sprintf("%.0fd", *days),
+		"config save:", savePolicy,
 	))
 
 	banner("STATUS")
@@ -506,13 +531,26 @@ func main() {
 		}
 	}
 
+	var savedCfgSaveMode string
+	var saveErr error
+	if saveRequested && deleteFailures == 0 {
+		savedCfgSaveMode, saveErr = client.saveConfigIfNeeded()
+		if saveErr != nil {
+			fmt.Fprintf(&out, "\n%s Configuration was changed but could not be persisted: %s\n",
+				failStyle.Render("[FAIL]"), saveErr)
+		} else if savedCfgSaveMode != "" {
+			fmt.Fprintf(&out, "\n%s Configuration persisted (cfg-save=%s).\n",
+				okStyle.Render("[SAVED]"), savedCfgSaveMode)
+		}
+	}
+
 	banner("SUMMARY")
-	mode := "APPLIED"
+	runMode := "APPLIED"
 	if *dryRun {
-		mode = "DRY RUN"
+		runMode = "DRY RUN"
 	}
 	summary := []string{
-		"mode:", mode,
+		"mode:", runMode,
 		"kept:", strconv.Itoa(keptCount),
 		"expired:", strconv.Itoa(len(toDelete)),
 	}
@@ -522,10 +560,26 @@ func main() {
 	if deleteFailures > 0 {
 		summary = append(summary, "delete failures:", strconv.Itoa(deleteFailures))
 	}
+	if *saveIfNeeded {
+		switch {
+		case *dryRun:
+			summary = append(summary, "config save:", "disabled in dry run")
+		case len(toDelete) == 0:
+			summary = append(summary, "config save:", "not needed")
+		case deleteFailures > 0:
+			summary = append(summary, "config save:", "skipped (delete failures)")
+		case saveErr != nil:
+			summary = append(summary, "config save:", "failed")
+		case savedCfgSaveMode != "":
+			summary = append(summary, "config save:", fmt.Sprintf("saved (%s)", savedCfgSaveMode))
+		default:
+			summary = append(summary, "config save:", "automatic")
+		}
+	}
 	fmt.Fprintln(&out, kvBox(summary...))
 
 	fmt.Println(boxWithTitle("Ban expiration", strings.Split(strings.TrimRight(out.String(), "\n"), "\n")...))
-	if deleteFailures > 0 {
+	if deleteFailures > 0 || saveErr != nil {
 		os.Exit(1)
 	}
 }

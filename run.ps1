@@ -3,7 +3,8 @@ param(
     [int]$Port      = 52920,
     [int]$Days      = 20,
     [string]$TokenFile = (Join-Path $PSScriptRoot "fgt-token.dpapi"),
-    [switch]$Apply
+    [switch]$Apply,
+    [switch]$SaveIfNeeded
 )
 
 Set-StrictMode -Version Latest
@@ -31,6 +32,7 @@ try {
 
     $cliArgs = @("-host", $FgtHost, "-port", $Port, "-days", $Days, "-token-stdin")
     if (-not $Apply) { $cliArgs += "-dry-run" }
+    if ($SaveIfNeeded) { $cliArgs += "-save-if-needed" }
 
     $plainToken | & $exe @cliArgs
     $exitCode = $LASTEXITCODE
