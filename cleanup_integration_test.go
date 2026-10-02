@@ -54,7 +54,13 @@ func TestCleanupConfigSaving(t *testing.T) {
 		wantOutput    []string
 	}{
 		{name: "flag disabled", wantAfterRead: []string{update, deleteOld}, wantOutput: []string{"[DELETED]", "SUMMARY"}},
-		{name: "dry run", flags: []string{"-save-if-needed", "-dry-run"}, wantOutput: []string{"DRY RUN", "disabled in dry run"}},
+		{name: "dry run", flags: []string{"-save-if-needed", "-dry-run"}, modes: []string{"manual"}, wantAfterRead: []string{readMode}, wantOutput: []string{"DRY RUN", "cfg-save:", "manual"}},
+		{name: "dry run without save flag", flags: []string{"-dry-run"}, modes: []string{"manual"}, wantAfterRead: []string{readMode}, wantOutput: []string{"DRY RUN", "cfg-save:", "manual"}},
+		{name: "dry run automatic", flags: []string{"-dry-run"}, modes: []string{"automatic"}, wantAfterRead: []string{readMode}, wantOutput: []string{"cfg-save:", "automatic"}},
+		{name: "dry run revert", flags: []string{"-save-if-needed", "-dry-run"}, modes: []string{"revert"}, wantAfterRead: []string{readMode}, wantOutput: []string{"cfg-save:", "revert"}},
+		{name: "dry run no expired entries", flags: []string{"-dry-run"}, noExpired: true, modes: []string{"manual"}, wantAfterRead: []string{readMode}, wantOutput: []string{"Nothing to expire", "cfg-save:", "manual"}},
+		{name: "dry run mode read fails", flags: []string{"-dry-run"}, failModeRead: 1, wantAfterRead: []string{readMode}, wantOutput: []string{"[WARN]", "SUMMARY", "cfg-save:", "unknown"}},
+		{name: "dry run unsupported mode", flags: []string{"-save-if-needed", "-dry-run"}, modes: []string{"unexpected"}, wantAfterRead: []string{readMode}, wantOutput: []string{"[WARN]", "unsupported cfg-save mode", "unknown"}},
 		{name: "nothing expired", flags: []string{"-save-if-needed"}, noExpired: true, wantOutput: []string{"not needed"}},
 		{name: "automatic", flags: []string{"-save-if-needed"}, modes: []string{"automatic", "automatic"}, wantAfterRead: []string{readMode, update, deleteOld, readMode}, wantOutput: []string{"[DELETED]", "automatic"}},
 		{name: "manual", flags: []string{"-save-if-needed"}, modes: []string{"manual", "manual"}, wantAfterRead: []string{readMode, update, deleteOld, readMode, save}, wantOutput: []string{"[SAVED]", "saved (manual)"}},
@@ -156,6 +162,11 @@ func TestCleanupConfigSaving(t *testing.T) {
 			for _, want := range tt.wantOutput {
 				if !strings.Contains(string(output), want) {
 					t.Errorf("output missing %q:\n%s", want, output)
+				}
+			}
+			for _, arg := range tt.flags {
+				if arg == "-dry-run" && strings.Contains(string(output), "config save:") {
+					t.Errorf("dry-run output still includes config save row:\n%s", output)
 				}
 			}
 			wantSaved := tt.wantExit == 0 && len(tt.wantAfterRead) > 0 && tt.wantAfterRead[len(tt.wantAfterRead)-1] == save

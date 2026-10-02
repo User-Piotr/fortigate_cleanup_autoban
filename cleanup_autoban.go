@@ -479,9 +479,12 @@ func main() {
 	// is read again immediately before saving so a concurrent mode change is
 	// handled using the current value.
 	saveRequested := !*dryRun && *saveIfNeeded && len(toDelete) > 0
-	if saveRequested {
-		if _, err := client.cfgSaveMode(); err != nil {
-			fmt.Fprintf(os.Stderr, "ERROR: configuration save preflight: %s\n", err)
+	var deviceCfgSaveMode string
+	var cfgSaveReadErr error
+	if *dryRun || saveRequested {
+		deviceCfgSaveMode, cfgSaveReadErr = client.cfgSaveMode()
+		if cfgSaveReadErr != nil && !*dryRun {
+			fmt.Fprintf(os.Stderr, "ERROR: configuration save preflight: %s\n", cfgSaveReadErr)
 			os.Exit(1)
 		}
 	}
@@ -494,17 +497,16 @@ func main() {
 		} else {
 			dryRunNote("%d %s would be expired.", len(toDelete), plural(len(toDelete), "entry", "entries"))
 		}
+		if cfgSaveReadErr != nil {
+			fmt.Fprintf(&out, "%s Could not read device cfg-save mode: %s\n",
+				warnStyle.Render("[WARN]"), cfgSaveReadErr)
+		}
 	}
 
-	savePolicy := "disabled"
-	if *saveIfNeeded {
-		savePolicy = "if needed"
-	}
 	banner("PARAMETERS")
 	fmt.Fprintln(&out, kvBox(
 		"group:", *group,
 		"age:", fmt.Sprintf("%.0fd", *days),
-		"config save:", savePolicy,
 	))
 
 	banner("STATUS")
@@ -549,21 +551,25 @@ func main() {
 	if *dryRun {
 		runMode = "DRY RUN"
 	}
-	summary := []string{
-		"mode:", runMode,
+	summary := []string{"mode:", runMode}
+	if *dryRun {
+		if cfgSaveReadErr != nil {
+			deviceCfgSaveMode = "unknown"
+		}
+		summary = append(summary, "cfg-save:", deviceCfgSaveMode)
+	}
+	summary = append(summary,
 		"kept:", strconv.Itoa(keptCount),
 		"expired:", strconv.Itoa(len(toDelete)),
-	}
+	)
 	if warnCount > 0 {
 		summary = append(summary, "warnings:", fmt.Sprintf("%d (see warn rows above)", warnCount))
 	}
 	if deleteFailures > 0 {
 		summary = append(summary, "delete failures:", strconv.Itoa(deleteFailures))
 	}
-	if *saveIfNeeded {
+	if *saveIfNeeded && !*dryRun {
 		switch {
-		case *dryRun:
-			summary = append(summary, "config save:", "disabled in dry run")
 		case len(toDelete) == 0:
 			summary = append(summary, "config save:", "not needed")
 		case deleteFailures > 0:

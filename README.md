@@ -107,9 +107,15 @@ Exits `0` on success, `1` on failure. Meant to run daily via cron or Task Schedu
 
 ## Configuration saving
 
-Configuration saving is optional. Without `-save-if-needed`, the tool does
+Configuration saving is optional. Without `-save-if-needed`, apply runs do
 not read `cfg-save` or request an explicit configuration save. The PowerShell
 wrapper enables this flag only when `-SaveIfNeeded` is supplied.
+
+Dry runs always read `cfg-save` using `GET /api/v2/cmdb/system/global` and
+display the device mode immediately below `mode: DRY RUN` in the summary.
+If the mode cannot be read, a warning is shown and the summary reports
+`cfg-save: unknown`; the cleanup preview still completes.
+This read checks neither permission to save nor configuration persistence.
 
 With the flag enabled, the tool reads `cfg-save` through
 `GET /api/v2/cmdb/system/global` before changing the group, provided this is
@@ -137,8 +143,10 @@ automation. Enable the flag only when committing all such changes is intended.
 In `revert` mode, cleanup and saving must finish before the timeout; the
 preflight does not postpone it.
 
-Dry runs and runs with no expired entries make no configuration-saving
-API calls. A failed group update or any failed deletion prevents the save.
+Dry runs send only GET requests and never update the group, delete addresses,
+or save configuration, even when `-save-if-needed` is supplied. Apply runs
+with no expired entries make no configuration-saving API calls.
+A failed group update or any failed deletion prevents the save.
 If the final mode read or save request fails, the tool prints the cleanup
 report and exits `1`. Already applied cleanup changes are not rolled back;
 their persistence must be checked on the FortiGate. Successful explicit
