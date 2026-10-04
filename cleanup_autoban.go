@@ -539,7 +539,13 @@ func main() {
 		}
 		var addrResp addressListResponse
 		if err := json.Unmarshal(body, &addrResp); err != nil || len(addrResp.Results) == 0 {
+			reason := "address response has no results"
+			if err != nil {
+				reason = "invalid address JSON"
+			}
+			tableLines = append(tableLines, row(warnStyle, "warn", m.Name, "-", reason+", left in group"))
 			keepMembers = append(keepMembers, m)
+			warnCount++
 			continue
 		}
 		comment := addrResp.Results[0].Comment
