@@ -4,6 +4,7 @@ param(
     [int]$Days      = 20,
     [string]$TokenFile = (Join-Path $PSScriptRoot "fgt-token.dpapi"),
     [switch]$Apply,
+    [Alias("Save")]
     [switch]$SaveIfNeeded
 )
 
@@ -32,7 +33,7 @@ try {
 
     $cliArgs = @("-host", $FgtHost, "-port", $Port, "-days", $Days, "-token-stdin")
     if (-not $Apply) { $cliArgs += "-dry-run" }
-    if ($SaveIfNeeded) { $cliArgs += "-save-if-needed" }
+    if ($SaveIfNeeded) { $cliArgs += "-save" }
 
     $plainToken | & $exe @cliArgs
     $exitCode = $LASTEXITCODE

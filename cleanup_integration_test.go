@@ -47,14 +47,20 @@ func TestCleanupConfigSaving(t *testing.T) {
 		flags         []string
 		modes         []string
 		noExpired     bool
+		allExpired    bool
+		ignoreUpdate  bool
+		failVerify    bool
+		verifyBody    string
 		failRequest   string
 		failModeRead  int
 		wantExit      int
 		wantAfterRead []string
 		wantOutput    []string
 	}{
-		{name: "flag disabled", wantAfterRead: []string{update, deleteOld}, wantOutput: []string{"[DELETED]", "SUMMARY"}},
+		{name: "flag disabled", wantAfterRead: []string{update, readGroup, deleteOld}, wantOutput: []string{"[DELETED]", "SUMMARY"}},
 		{name: "dry run", flags: []string{"-save-if-needed", "-dry-run"}, modes: []string{"manual"}, wantAfterRead: []string{readMode}, wantOutput: []string{"DRY RUN", "cfg-save:", "manual"}},
+		{name: "save with dry run", flags: []string{"-save", "-dry-run"}, modes: []string{"revert"}, wantAfterRead: []string{readMode}, wantOutput: []string{"DRY RUN", "cfg-save:", "revert"}},
+		{name: "save after dry run", flags: []string{"-dry-run", "-save"}, modes: []string{"manual"}, wantAfterRead: []string{readMode}, wantOutput: []string{"DRY RUN", "cfg-save:", "manual"}},
 		{name: "dry run without save flag", flags: []string{"-dry-run"}, modes: []string{"manual"}, wantAfterRead: []string{readMode}, wantOutput: []string{"DRY RUN", "cfg-save:", "manual"}},
 		{name: "dry run automatic", flags: []string{"-dry-run"}, modes: []string{"automatic"}, wantAfterRead: []string{readMode}, wantOutput: []string{"cfg-save:", "automatic"}},
 		{name: "dry run revert", flags: []string{"-save-if-needed", "-dry-run"}, modes: []string{"revert"}, wantAfterRead: []string{readMode}, wantOutput: []string{"cfg-save:", "revert"}},
@@ -62,17 +68,26 @@ func TestCleanupConfigSaving(t *testing.T) {
 		{name: "dry run mode read fails", flags: []string{"-dry-run"}, failModeRead: 1, wantAfterRead: []string{readMode}, wantOutput: []string{"[WARN]", "SUMMARY", "cfg-save:", "unknown"}},
 		{name: "dry run unsupported mode", flags: []string{"-save-if-needed", "-dry-run"}, modes: []string{"unexpected"}, wantAfterRead: []string{readMode}, wantOutput: []string{"[WARN]", "unsupported cfg-save mode", "unknown"}},
 		{name: "nothing expired", flags: []string{"-save-if-needed"}, noExpired: true, wantOutput: []string{"not needed"}},
-		{name: "automatic", flags: []string{"-save-if-needed"}, modes: []string{"automatic", "automatic"}, wantAfterRead: []string{readMode, update, deleteOld, readMode}, wantOutput: []string{"[DELETED]", "automatic"}},
-		{name: "manual", flags: []string{"-save-if-needed"}, modes: []string{"manual", "manual"}, wantAfterRead: []string{readMode, update, deleteOld, readMode, save}, wantOutput: []string{"[SAVED]", "saved (manual)"}},
-		{name: "revert", flags: []string{"-save-if-needed"}, modes: []string{"revert", "revert"}, wantAfterRead: []string{readMode, update, deleteOld, readMode, save}, wantOutput: []string{"[SAVED]", "saved (revert)"}},
+		{name: "automatic", flags: []string{"-save-if-needed"}, modes: []string{"automatic", "automatic"}, wantAfterRead: []string{readMode, update, readGroup, deleteOld, readMode}, wantOutput: []string{"[DELETED]", "automatic"}},
+		{name: "manual", flags: []string{"-save-if-needed"}, modes: []string{"manual", "manual"}, wantAfterRead: []string{readMode, update, readGroup, deleteOld, readMode, save}, wantOutput: []string{"[SAVED]", "saved (manual)"}},
+		{name: "save manual", flags: []string{"-save"}, modes: []string{"manual", "manual"}, wantAfterRead: []string{readMode, update, readGroup, deleteOld, readMode, save}, wantOutput: []string{"[SAVED]", "saved (manual)"}},
+		{name: "save revert", flags: []string{"-save"}, modes: []string{"revert", "revert"}, wantAfterRead: []string{readMode, update, readGroup, deleteOld, readMode, save}, wantOutput: []string{"[SAVED]", "saved (revert)"}},
+		{name: "save automatic", flags: []string{"-save"}, modes: []string{"automatic", "automatic"}, wantAfterRead: []string{readMode, update, readGroup, deleteOld, readMode}, wantOutput: []string{"automatic"}},
+		{name: "revert", flags: []string{"-save-if-needed"}, modes: []string{"revert", "revert"}, wantAfterRead: []string{readMode, update, readGroup, deleteOld, readMode, save}, wantOutput: []string{"[SAVED]", "saved (revert)"}},
 		{name: "preflight read fails", flags: []string{"-save-if-needed"}, failModeRead: 1, wantExit: 1, wantAfterRead: []string{readMode}, wantOutput: []string{"configuration save preflight"}},
 		{name: "unsupported preflight mode", flags: []string{"-save-if-needed"}, modes: []string{"unexpected"}, wantExit: 1, wantAfterRead: []string{readMode}, wantOutput: []string{"unsupported cfg-save mode"}},
 		{name: "group update fails", flags: []string{"-save-if-needed"}, modes: []string{"manual"}, failRequest: update, wantExit: 1, wantAfterRead: []string{readMode, update}, wantOutput: []string{"failed to update group membership"}},
-		{name: "delete fails", flags: []string{"-save-if-needed"}, modes: []string{"manual"}, failRequest: deleteOld, wantExit: 1, wantAfterRead: []string{readMode, update, deleteOld}, wantOutput: []string{"SUMMARY", "skipped (delete failures)"}},
-		{name: "final read fails", flags: []string{"-save-if-needed"}, modes: []string{"manual"}, failModeRead: 2, wantExit: 1, wantAfterRead: []string{readMode, update, deleteOld, readMode}, wantOutput: []string{"[DELETED]", "SUMMARY", "could not be persisted", "read cfg-save mode"}},
-		{name: "save fails", flags: []string{"-save-if-needed"}, modes: []string{"manual", "manual"}, failRequest: save, wantExit: 1, wantAfterRead: []string{readMode, update, deleteOld, readMode, save}, wantOutput: []string{"[DELETED]", "SUMMARY", "could not be persisted", "save configuration"}},
-		{name: "mode changes to automatic", flags: []string{"-save-if-needed"}, modes: []string{"manual", "automatic"}, wantAfterRead: []string{readMode, update, deleteOld, readMode}, wantOutput: []string{"automatic"}},
-		{name: "mode changes to revert", flags: []string{"-save-if-needed"}, modes: []string{"automatic", "revert"}, wantAfterRead: []string{readMode, update, deleteOld, readMode, save}, wantOutput: []string{"saved (revert)"}},
+		{name: "delete fails", flags: []string{"-save-if-needed"}, modes: []string{"manual"}, failRequest: deleteOld, wantExit: 1, wantAfterRead: []string{readMode, update, readGroup, deleteOld}, wantOutput: []string{"SUMMARY", "skipped (delete failures)"}},
+		{name: "final read fails", flags: []string{"-save-if-needed"}, modes: []string{"manual"}, failModeRead: 2, wantExit: 1, wantAfterRead: []string{readMode, update, readGroup, deleteOld, readMode}, wantOutput: []string{"[DELETED]", "SUMMARY", "could not be persisted", "read cfg-save mode"}},
+		{name: "save fails", flags: []string{"-save-if-needed"}, modes: []string{"manual", "manual"}, failRequest: save, wantExit: 1, wantAfterRead: []string{readMode, update, readGroup, deleteOld, readMode, save}, wantOutput: []string{"[DELETED]", "SUMMARY", "could not be persisted", "save configuration"}},
+		{name: "mode changes to automatic", flags: []string{"-save-if-needed"}, modes: []string{"manual", "automatic"}, wantAfterRead: []string{readMode, update, readGroup, deleteOld, readMode}, wantOutput: []string{"automatic"}},
+		{name: "mode changes to revert", flags: []string{"-save-if-needed"}, modes: []string{"automatic", "revert"}, wantAfterRead: []string{readMode, update, readGroup, deleteOld, readMode, save}, wantOutput: []string{"saved (revert)"}},
+		{name: "entire group expires", flags: []string{"-save"}, allExpired: true, modes: []string{"manual", "manual"}, wantAfterRead: []string{readMode, update, readGroup, deleteOld, readMode, save}, wantOutput: []string{"[DELETED]", "saved (manual)"}},
+		{name: "PUT does not remove members", flags: []string{"-save"}, allExpired: true, ignoreUpdate: true, modes: []string{"manual"}, wantExit: 1, wantAfterRead: []string{readMode, update, readGroup}, wantOutput: []string{"membership verification failed", "still in group", "No address deletions or explicit configuration save"}},
+		{name: "verification read fails", flags: []string{"-save"}, failVerify: true, modes: []string{"manual"}, wantExit: 1, wantAfterRead: []string{readMode, update, readGroup}, wantOutput: []string{"membership verification failed", "HTTP 403", "No address deletions"}},
+		{name: "verification JSON invalid", verifyBody: `{`, wantExit: 1, wantAfterRead: []string{update, readGroup}, wantOutput: []string{"parse group after update", "No address deletions"}},
+		{name: "verification results missing", verifyBody: `{"results":[]}`, wantExit: 1, wantAfterRead: []string{update, readGroup}, wantOutput: []string{"expected one group after update", "No address deletions"}},
+		{name: "verification members missing", verifyBody: `{"results":[{}]}`, wantExit: 1, wantAfterRead: []string{update, readGroup}, wantOutput: []string{"group member list is missing or null", "No address deletions"}},
 	}
 
 	executable, err := os.Executable()
@@ -84,6 +99,11 @@ func TestCleanupConfigSaving(t *testing.T) {
 			var mu sync.Mutex
 			var requests []string
 			modeReads := 0
+			groupReads := 0
+			groupMembers := []groupMember{{Name: "old"}, {Name: "keep"}}
+			if tt.allExpired {
+				groupMembers = []groupMember{{Name: "old"}}
+			}
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				mu.Lock()
 				defer mu.Unlock()
@@ -95,14 +115,21 @@ func TestCleanupConfigSaving(t *testing.T) {
 				if request == readMode {
 					modeReads++
 				}
-				if request == tt.failRequest || (request == readMode && modeReads == tt.failModeRead) {
+				if request == readGroup {
+					groupReads++
+				}
+				if request == tt.failRequest || (request == readMode && modeReads == tt.failModeRead) || (request == readGroup && groupReads == 2 && tt.failVerify) {
 					w.WriteHeader(http.StatusForbidden)
 					_, _ = w.Write([]byte(`{"status":"error"}`))
 					return
 				}
 				switch request {
 				case readGroup:
-					_, _ = w.Write([]byte(`{"results":[{"member":[{"name":"old"},{"name":"keep"}]}]}`))
+					if groupReads == 2 && tt.verifyBody != "" {
+						_, _ = w.Write([]byte(tt.verifyBody))
+						return
+					}
+					_ = json.NewEncoder(w).Encode(addrgrpListResponse{Results: []addrgrpObject{{Member: groupMembers}}})
 				case readOld:
 					comment := "autoban:1"
 					if tt.noExpired {
@@ -124,8 +151,16 @@ func TestCleanupConfigSaving(t *testing.T) {
 					}
 					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 						t.Errorf("decode group update: %v", err)
-					} else if !reflect.DeepEqual(body.Member, []groupMember{{Name: "keep"}}) {
-						t.Errorf("group update discarded manual member: %+v", body.Member)
+					}
+					wantMembers := []groupMember{{Name: "keep"}}
+					if tt.allExpired {
+						wantMembers = []groupMember{}
+					}
+					if !reflect.DeepEqual(body.Member, wantMembers) {
+						t.Errorf("updated members = %#v, want %#v (an empty group must use [], not null)", body.Member, wantMembers)
+					}
+					if !tt.ignoreUpdate {
+						groupMembers = body.Member
 					}
 				case deleteOld, save:
 					w.WriteHeader(http.StatusOK)
@@ -155,7 +190,11 @@ func TestCleanupConfigSaving(t *testing.T) {
 			mu.Lock()
 			gotRequests := append([]string(nil), requests...)
 			mu.Unlock()
-			wantRequests := append([]string{readGroup, readOld, readKeep}, tt.wantAfterRead...)
+			wantRequests := []string{readGroup, readOld}
+			if !tt.allExpired {
+				wantRequests = append(wantRequests, readKeep)
+			}
+			wantRequests = append(wantRequests, tt.wantAfterRead...)
 			if !reflect.DeepEqual(gotRequests, wantRequests) {
 				t.Errorf("requests = %v, want %v", gotRequests, wantRequests)
 			}

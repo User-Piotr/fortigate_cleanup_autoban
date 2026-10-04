@@ -8,6 +8,14 @@ entries older than `-days`, then deletes the address object.
 
 Entries without an `autoban:` comment (manual blocks) are never touched.
 
+When all members expire, the group update sends an empty array (`member: []`),
+not `null`. After every membership update, the tool reads the group again and
+verifies that the expired entries are no longer members before attempting
+address deletions. If this verification fails, it stops without deleting
+addresses or explicitly saving configuration. The group update may already
+have taken effect; the tool does not roll it back. FortiGate API failure
+reports include the numeric `error` code and message/CLI details when present.
+
 ## Build
 
 ```sh
@@ -55,7 +63,7 @@ printf '%s\n' "$TOKEN" | go run . \
     -token-stdin \
     -days 7 \
     -group admin-failed-login \
-    -save-if-needed
+    -save
 ```
 
 ```powershell
@@ -86,7 +94,7 @@ $env:FGT_TOKEN | & .\expire_autoban.exe `
     -Port 52920 `
     -Days 7 `
     -Apply `
-    -SaveIfNeeded
+    -Save
 ```
 
 ## Flags
@@ -100,16 +108,18 @@ $env:FGT_TOKEN | & .\expire_autoban.exe `
 | `-group` | `admin-failed-login` | address group to expire |
 | `-days` | `7` | age threshold; must be finite and greater than or equal to `0` |
 | `-dry-run` | `false` | show what would change |
-| `-save-if-needed` | `false` | explicitly save the running configuration after successful cleanup when `cfg-save` is `manual` or `revert` |
+| `-save` | `false` | explicitly save the running configuration after successful cleanup when `cfg-save` is `manual` or `revert` |
+| `-save-if-needed` | `false` | compatibility alias for `-save` |
 | `-insecure` | `true` | skip TLS verify (self-signed certs) |
 
 Exits `0` on success, `1` on failure. Meant to run daily via cron or Task Scheduler.
 
 ## Configuration saving
 
-Configuration saving is optional. Without `-save-if-needed`, apply runs do
+Configuration saving is optional. Without `-save` (or its compatibility
+alias `-save-if-needed`), apply runs do
 not read `cfg-save` or request an explicit configuration save. The PowerShell
-wrapper enables this flag only when `-SaveIfNeeded` is supplied.
+wrapper enables this flag only when `-Save` or `-SaveIfNeeded` is supplied.
 
 Dry runs always read `cfg-save` using `GET /api/v2/cmdb/system/global` and
 display the device mode immediately below `mode: DRY RUN` in the summary.
@@ -144,7 +154,8 @@ In `revert` mode, cleanup and saving must finish before the timeout; the
 preflight does not postpone it.
 
 Dry runs send only GET requests and never update the group, delete addresses,
-or save configuration, even when `-save-if-needed` is supplied. Apply runs
+or save configuration, even when `-save` or `-save-if-needed` is supplied.
+The order of `-save` and `-dry-run` does not change this behavior. Apply runs
 with no expired entries make no configuration-saving API calls.
 A failed group update or any failed deletion prevents the save.
 If the final mode read or save request fails, the tool prints the cleanup
@@ -189,5 +200,5 @@ PowerShell session; a file created by a normal user cannot be decrypted by
 
 Omit `-Apply` for a dry-run. Use a full path to `run.ps1` if the project lives
 elsewhere, and run the setup command again if the task account changes.
-Append `-SaveIfNeeded` to the scheduled task arguments to explicitly allow
+Append `-Save` (or `-SaveIfNeeded`) to the scheduled task arguments to explicitly allow
 saving after successful cleanup. It has no effect without `-Apply`.

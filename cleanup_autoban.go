@@ -329,6 +329,42 @@ func deleteAddress(c *apiClient, name string) bool {
 	return true
 }
 
+// verifyGroupRemoval checks the actual membership instead of trusting PUT's
+// HTTP status. A remaining reference prevents all address deletions and saving.
+func (c *apiClient) verifyGroupRemoval(group string, removed []string) error {
+	status, body, err := c.do(http.MethodGet, "firewall/addrgrp/"+group, nil)
+	if err != nil || status != http.StatusOK {
+		return fmt.Errorf("read group after update: %s", summarizeError(status, body, err))
+	}
+	var response addrgrpListResponse
+	if err := json.Unmarshal(body, &response); err != nil {
+		return fmt.Errorf("parse group after update: %w", err)
+	}
+	if len(response.Results) != 1 {
+		return fmt.Errorf("expected one group after update, got %d", len(response.Results))
+	}
+	if response.Results[0].Member == nil {
+		return fmt.Errorf("group member list is missing or null after update")
+	}
+	removedNames := make(map[string]bool, len(removed))
+	for _, name := range removed {
+		removedNames[name] = true
+	}
+	remaining := 0
+	var example string
+	for _, member := range response.Results[0].Member {
+		if removedNames[member.Name] {
+			remaining++
+			example = member.Name
+		}
+	}
+	if remaining > 0 {
+		return fmt.Errorf("%d expired %s still in group %q (e.g. %q)",
+			remaining, plural(remaining, "address is", "addresses are"), group, example)
+	}
+	return nil
+}
+
 // summarizeError turns a failed API response into a short, actionable
 // message. FortiGate returns raw HTML (not JSON) when auth is rejected
 // before the request ever reaches the REST handler -- e.g. a bad/expired
@@ -351,19 +387,42 @@ func summarizeError(status int, body []byte, err error) string {
 
 	// A FortiGate JSON error is mostly bookkeeping (revision, serial, build,
 	// vdom...) that tells the operator nothing. Keep only the parts that
-	// identify what was rejected.
+	// identify what was rejected, including the FortiOS error code.
 	var apiErr struct {
-		Status string `json:"status"`
-		Path   string `json:"path"`
-		Name   string `json:"name"`
-		Mkey   string `json:"mkey"`
+		Status   string          `json:"status"`
+		Path     string          `json:"path"`
+		Name     string          `json:"name"`
+		Mkey     string          `json:"mkey"`
+		Error    *int            `json:"error"`
+		Message  json.RawMessage `json:"message"`
+		CLIError json.RawMessage `json:"cli_error"`
 	}
 	if json.Unmarshal(body, &apiErr) == nil && apiErr.Status == "error" {
+		message := fmt.Sprintf("HTTP %d", status)
 		target := strings.Trim(apiErr.Path+"/"+apiErr.Name+"/"+apiErr.Mkey, "/")
 		if target != "" {
-			return fmt.Sprintf("HTTP %d on %s", status, target)
+			message += " on " + target
 		}
-		return fmt.Sprintf("HTTP %d", status)
+		if apiErr.Error != nil {
+			message += fmt.Sprintf(" (error=%d)", *apiErr.Error)
+		}
+		for _, raw := range []json.RawMessage{apiErr.Message, apiErr.CLIError} {
+			var detail string
+			if json.Unmarshal(raw, &detail) != nil {
+				var lines []string
+				if json.Unmarshal(raw, &lines) == nil {
+					detail = strings.Join(lines, "; ")
+				}
+			}
+			detail = strings.Join(strings.Fields(detail), " ")
+			if len(detail) > 300 {
+				detail = detail[:300] + "..."
+			}
+			if detail != "" {
+				message += ": " + detail
+			}
+		}
+		return message
 	}
 
 	if len(trimmed) > 300 {
@@ -380,7 +439,8 @@ func main() {
 	group := flag.String("group", "admin-failed-login", "Address group name to age-expire")
 	days := flag.Float64("days", 7, "Age threshold in days before an autoban: entry expires")
 	dryRun := flag.Bool("dry-run", false, "Show what would change, make no changes")
-	saveIfNeeded := flag.Bool("save-if-needed", false, "Persist config after a successful run when cfg-save is manual or revert")
+	saveIfNeeded := flag.Bool("save", false, "Persist config after a successful run when cfg-save is manual or revert")
+	flag.BoolVar(saveIfNeeded, "save-if-needed", false, "Alias for -save")
 	insecure := flag.Bool("insecure", true, "Skip TLS verification (default true, self-signed FortiGate certs)")
 	flag.Parse()
 
@@ -390,7 +450,7 @@ func main() {
 		os.Exit(1)
 	}
 	if *host == "" || resolvedToken == "" {
-		fmt.Println("Usage: expire_autoban -host <ip> (-token <api_token> | -token-stdin) [-port 443] [-group admin-failed-login] [-days 7] [-dry-run] [-save-if-needed]")
+		fmt.Println("Usage: expire_autoban -host <ip> (-token <api_token> | -token-stdin) [-port 443] [-group admin-failed-login] [-days 7] [-dry-run] [-save]")
 		os.Exit(1)
 	}
 	if math.IsNaN(*days) || math.IsInf(*days, 0) || *days < 0 {
@@ -426,7 +486,8 @@ func main() {
 
 	members := grpResp.Results[0].Member
 
-	var keepMembers []groupMember
+	// A non-nil empty slice encodes as [] so an entirely expired group clears.
+	keepMembers := make([]groupMember, 0, len(members))
 	var toDelete []string
 	keptCount, warnCount := 0, 0
 
@@ -522,6 +583,14 @@ func main() {
 		status, body, err := client.do("PUT", "firewall/addrgrp/"+*group, newMemberJSON)
 		if err != nil || status != 200 {
 			fmt.Fprintf(os.Stderr, "ERROR: failed to update group membership: %s\n", summarizeError(status, body, err))
+			os.Exit(1)
+		}
+		if err := client.verifyGroupRemoval(*group, toDelete); err != nil {
+			fmt.Fprintf(&out, "\n%s Group membership verification failed: %s\n",
+				failStyle.Render("[FAIL]"), err)
+			fmt.Fprintln(&out, "No address deletions or explicit configuration save were attempted.")
+			fmt.Println(boxWithTitle("Ban expiration", strings.Split(strings.TrimRight(out.String(), "\n"), "\n")...))
+			fmt.Fprintf(os.Stderr, "ERROR: group membership verification failed: %s\n", err)
 			os.Exit(1)
 		}
 		fmt.Fprintf(&out, "\n%s Group '%s' updated, %d %s removed:\n", okStyle.Render("[OK]"), *group, len(toDelete), plural(len(toDelete), "member", "members"))
