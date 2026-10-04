@@ -46,6 +46,7 @@ func TestCleanupConfigSaving(t *testing.T) {
 		name          string
 		flags         []string
 		modes         []string
+		oldResponse   string
 		noExpired     bool
 		allExpired    bool
 		ignoreUpdate  bool
@@ -67,6 +68,18 @@ func TestCleanupConfigSaving(t *testing.T) {
 		{name: "dry run automatic", flags: []string{"-dry-run"}, modes: []string{"automatic"}, wantAfterRead: []string{readMode}, wantOutput: []string{"cfg-save:", "automatic"}},
 		{name: "dry run revert", flags: []string{"-save-if-needed", "-dry-run"}, modes: []string{"revert"}, wantAfterRead: []string{readMode}, wantOutput: []string{"cfg-save:", "revert"}},
 		{name: "dry run no expired entries", flags: []string{"-dry-run"}, noExpired: true, modes: []string{"manual"}, wantAfterRead: []string{readMode}, wantOutput: []string{"Nothing to expire", "cfg-save:", "manual"}},
+		{
+			name:  "invalid address JSON is reported",
+			flags: []string{"-dry-run"}, modes: []string{"manual"}, oldResponse: `{`,
+			wantAfterRead: []string{readMode},
+			wantOutput:    []string{"invalid address JSON, left in group", "warnings:", "1 (see warn rows above)"},
+		},
+		{
+			name:  "empty address results are reported",
+			flags: []string{"-dry-run"}, modes: []string{"manual"}, oldResponse: `{"results":[]}`,
+			wantAfterRead: []string{readMode},
+			wantOutput:    []string{"address response has no results, left in group", "warnings:", "1 (see warn rows above)"},
+		},
 		{name: "dry run mode read fails", flags: []string{"-dry-run"}, failModeRead: 1, wantAfterRead: []string{readMode}, wantOutput: []string{"[WARN]", "SUMMARY", "cfg-save:", "unknown"}},
 		{name: "dry run unsupported mode", flags: []string{"-save-if-needed", "-dry-run"}, modes: []string{"unexpected"}, wantAfterRead: []string{readMode}, wantOutput: []string{"[WARN]", "unsupported cfg-save mode", "unknown"}},
 		{name: "nothing expired", flags: []string{"-save-if-needed"}, noExpired: true, wantOutput: []string{"not needed"}},
@@ -137,6 +150,10 @@ func TestCleanupConfigSaving(t *testing.T) {
 					}
 					_ = json.NewEncoder(w).Encode(addrgrpListResponse{Results: []addrgrpObject{{Member: groupMembers}}})
 				case readOld:
+					if tt.oldResponse != "" {
+						_, _ = w.Write([]byte(tt.oldResponse))
+						return
+					}
 					comment := "autoban:1"
 					if tt.noExpired {
 						comment = "manual block"
