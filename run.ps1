@@ -2,6 +2,7 @@ param(
     [string]$FgtHost = "10.0.40.1",
     [int]$Port      = 52920,
     [int]$Days      = 20,
+    [string]$WriteTimeout = "2m",
     [string]$TokenFile = (Join-Path $PSScriptRoot "fgt-token.dpapi"),
     [switch]$Apply,
     [Alias("Save")]
@@ -31,7 +32,7 @@ try {
         throw "DPAPI token file decrypted to an empty value."
     }
 
-    $cliArgs = @("-host", $FgtHost, "-port", $Port, "-days", $Days, "-token-stdin")
+    $cliArgs = @("-host", $FgtHost, "-port", $Port, "-days", $Days, "-token-stdin", "-write-timeout", $WriteTimeout)
     if (-not $Apply) { $cliArgs += "-dry-run" }
     if ($SaveIfNeeded) { $cliArgs += "-save" }
 

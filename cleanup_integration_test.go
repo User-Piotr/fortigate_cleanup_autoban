@@ -49,6 +49,8 @@ func TestCleanupConfigSaving(t *testing.T) {
 		noExpired     bool
 		allExpired    bool
 		ignoreUpdate  bool
+		delayUpdate   time.Duration
+		delaySave     time.Duration
 		failVerify    bool
 		verifyBody    string
 		failRequest   string
@@ -84,10 +86,14 @@ func TestCleanupConfigSaving(t *testing.T) {
 		{name: "mode changes to revert", flags: []string{"-save-if-needed"}, modes: []string{"automatic", "revert"}, wantAfterRead: []string{readMode, update, readGroup, deleteOld, readMode, save}, wantOutput: []string{"saved (revert)"}},
 		{name: "entire group expires", flags: []string{"-save"}, allExpired: true, modes: []string{"manual", "manual"}, wantAfterRead: []string{readMode, update, readGroup, deleteOld, readMode, save}, wantOutput: []string{"[DELETED]", "saved (manual)"}},
 		{name: "PUT does not remove members", flags: []string{"-save"}, allExpired: true, ignoreUpdate: true, modes: []string{"manual"}, wantExit: 1, wantAfterRead: []string{readMode, update, readGroup}, wantOutput: []string{"membership verification failed", "still in group", "No address deletions or explicit configuration save"}},
+		{name: "PUT times out after update", flags: []string{"-save", "-write-timeout", "50ms"}, allExpired: true, delayUpdate: 200 * time.Millisecond, modes: []string{"manual", "manual"}, wantAfterRead: []string{readMode, update, readGroup, deleteOld, readMode, save}, wantOutput: []string{"Group PUT timed out", "read-back confirms", "[DELETED]", "[SAVED]"}},
+		{name: "PUT times out without update", flags: []string{"-save", "-write-timeout", "50ms"}, allExpired: true, ignoreUpdate: true, delayUpdate: 200 * time.Millisecond, modes: []string{"manual"}, wantExit: 1, wantAfterRead: []string{readMode, update, readGroup}, wantOutput: []string{"PUT timed out", "still in group", "No address deletions or explicit configuration save"}},
+		{name: "explicit save times out", flags: []string{"-save", "-write-timeout", "50ms"}, modes: []string{"manual", "manual"}, delaySave: 200 * time.Millisecond, wantExit: 1, wantAfterRead: []string{readMode, update, readGroup, deleteOld, readMode, save}, wantOutput: []string{"[DELETED]", "save outcome is unknown", "config save:", "outcome unknown", "context deadline exceeded"}},
 		{name: "verification read fails", flags: []string{"-save"}, failVerify: true, modes: []string{"manual"}, wantExit: 1, wantAfterRead: []string{readMode, update, readGroup}, wantOutput: []string{"membership verification failed", "HTTP 403", "No address deletions"}},
 		{name: "verification JSON invalid", verifyBody: `{`, wantExit: 1, wantAfterRead: []string{update, readGroup}, wantOutput: []string{"parse group after update", "No address deletions"}},
 		{name: "verification results missing", verifyBody: `{"results":[]}`, wantExit: 1, wantAfterRead: []string{update, readGroup}, wantOutput: []string{"expected one group after update", "No address deletions"}},
 		{name: "verification members missing", verifyBody: `{"results":[{}]}`, wantExit: 1, wantAfterRead: []string{update, readGroup}, wantOutput: []string{"group member list is missing or null", "No address deletions"}},
+		{name: "verification retained member missing", verifyBody: `{"results":[{"member":[]}]}`, wantExit: 1, wantAfterRead: []string{update, readGroup}, wantOutput: []string{"retained address is missing from group", "No address deletions"}},
 	}
 
 	executable, err := os.Executable()
@@ -162,7 +168,15 @@ func TestCleanupConfigSaving(t *testing.T) {
 					if !tt.ignoreUpdate {
 						groupMembers = body.Member
 					}
-				case deleteOld, save:
+					if tt.delayUpdate > 0 {
+						time.Sleep(tt.delayUpdate)
+					}
+				case save:
+					if tt.delaySave > 0 {
+						time.Sleep(tt.delaySave)
+					}
+					w.WriteHeader(http.StatusOK)
+				case deleteOld:
 					w.WriteHeader(http.StatusOK)
 				default:
 					t.Errorf("unexpected request %q", request)

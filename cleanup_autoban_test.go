@@ -2,9 +2,29 @@ package main
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestWriteTimeoutIsSeparateFromReadTimeout(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(120 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	client := testAPIClient(t, server)
+	client.http.Timeout = 40 * time.Millisecond
+	client.writeTimeout = 500 * time.Millisecond
+
+	if _, _, err := client.do(http.MethodGet, "system/global", nil); err == nil {
+		t.Fatal("GET unexpectedly exceeded its read timeout")
+	}
+	if status, _, err := client.doMonitor(http.MethodPost, "system/config/save?vdom=root", []byte(`{}`)); err != nil || status != http.StatusOK {
+		t.Fatalf("POST status = %d, error = %v; want 200 within write timeout", status, err)
+	}
+}
 
 func TestSummarizeFortiGateError(t *testing.T) {
 	tests := []struct {

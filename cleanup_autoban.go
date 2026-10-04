@@ -44,10 +44,12 @@ import (
 	"bytes"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"os"
 	"regexp"
@@ -59,8 +61,9 @@ import (
 )
 
 const (
-	secondsPerDay = 86400
-	maxTokenBytes = 64 * 1024
+	secondsPerDay       = 86400
+	maxTokenBytes       = 64 * 1024
+	defaultWriteTimeout = 2 * time.Minute
 )
 
 var commentPrefixRe = regexp.MustCompile(`^autoban:(\d+)$`)
@@ -209,19 +212,21 @@ type addrgrpListResponse struct {
 }
 
 type apiClient struct {
-	http  *http.Client
-	host  string
-	port  int
-	token string
+	http         *http.Client
+	writeTimeout time.Duration
+	host         string
+	port         int
+	token        string
 }
 
 func newAPIClient(host string, port int, token string, insecure bool) *apiClient {
 	tr := &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: insecure}}
 	return &apiClient{
-		http:  &http.Client{Transport: tr, Timeout: 20 * time.Second},
-		host:  host,
-		port:  port,
-		token: token,
+		http:         &http.Client{Transport: tr, Timeout: 20 * time.Second},
+		writeTimeout: defaultWriteTimeout,
+		host:         host,
+		port:         port,
+		token:        token,
 	}
 }
 
@@ -240,7 +245,13 @@ func (c *apiClient) doAPI(method, apiPath string, body []byte) (int, []byte, err
 		req.Header.Set("Content-Type", "application/json")
 	}
 
-	resp, err := c.http.Do(req)
+	httpClient := c.http
+	if method == http.MethodPut || method == http.MethodPost {
+		writeClient := *c.http
+		writeClient.Timeout = c.writeTimeout
+		httpClient = &writeClient
+	}
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -330,8 +341,9 @@ func deleteAddress(c *apiClient, name string) bool {
 }
 
 // verifyGroupRemoval checks the actual membership instead of trusting PUT's
-// HTTP status. A remaining reference prevents all address deletions and saving.
-func (c *apiClient) verifyGroupRemoval(group string, removed []string) error {
+// HTTP status. Missing retained members or remaining expired references stop
+// address deletion and saving.
+func (c *apiClient) verifyGroupRemoval(group string, removed []string, kept []groupMember) error {
 	status, body, err := c.do(http.MethodGet, "firewall/addrgrp/"+group, nil)
 	if err != nil || status != http.StatusOK {
 		return fmt.Errorf("read group after update: %s", summarizeError(status, body, err))
@@ -352,7 +364,9 @@ func (c *apiClient) verifyGroupRemoval(group string, removed []string) error {
 	}
 	remaining := 0
 	var example string
+	actualNames := make(map[string]bool, len(response.Results[0].Member))
 	for _, member := range response.Results[0].Member {
+		actualNames[member.Name] = true
 		if removedNames[member.Name] {
 			remaining++
 			example = member.Name
@@ -361,6 +375,17 @@ func (c *apiClient) verifyGroupRemoval(group string, removed []string) error {
 	if remaining > 0 {
 		return fmt.Errorf("%d expired %s still in group %q (e.g. %q)",
 			remaining, plural(remaining, "address is", "addresses are"), group, example)
+	}
+	missing := 0
+	for _, member := range kept {
+		if !actualNames[member.Name] {
+			missing++
+			example = member.Name
+		}
+	}
+	if missing > 0 {
+		return fmt.Errorf("%d retained %s missing from group %q (e.g. %q)",
+			missing, plural(missing, "address is", "addresses are"), group, example)
 	}
 	return nil
 }
@@ -441,6 +466,7 @@ func main() {
 	dryRun := flag.Bool("dry-run", false, "Show what would change, make no changes")
 	saveIfNeeded := flag.Bool("save", false, "Persist config after a successful run when cfg-save is manual or revert")
 	flag.BoolVar(saveIfNeeded, "save-if-needed", false, "Alias for -save")
+	writeTimeout := flag.Duration("write-timeout", defaultWriteTimeout, "Timeout per group update or explicit config save (default 2m)")
 	insecure := flag.Bool("insecure", true, "Skip TLS verification (default true, self-signed FortiGate certs)")
 	flag.Parse()
 
@@ -450,15 +476,20 @@ func main() {
 		os.Exit(1)
 	}
 	if *host == "" || resolvedToken == "" {
-		fmt.Println("Usage: expire_autoban -host <ip> (-token <api_token> | -token-stdin) [-port 443] [-group admin-failed-login] [-days 7] [-dry-run] [-save]")
+		fmt.Println("Usage: expire_autoban -host <ip> (-token <api_token> | -token-stdin) [-port 443] [-group admin-failed-login] [-days 7] [-dry-run] [-save] [-write-timeout 2m]")
 		os.Exit(1)
 	}
 	if math.IsNaN(*days) || math.IsInf(*days, 0) || *days < 0 {
 		fmt.Fprintln(os.Stderr, "ERROR: -days must be a finite number greater than or equal to 0.")
 		os.Exit(1)
 	}
+	if *writeTimeout <= 0 {
+		fmt.Fprintln(os.Stderr, "ERROR: -write-timeout must be greater than 0.")
+		os.Exit(1)
+	}
 
 	client := newAPIClient(*host, *port, resolvedToken, *insecure)
+	client.writeTimeout = *writeTimeout
 	thresholdSeconds := *days * secondsPerDay
 	now := time.Now().Unix()
 
@@ -581,17 +612,26 @@ func main() {
 	if !*dryRun && len(toDelete) > 0 {
 		newMemberJSON, _ := json.Marshal(map[string]any{"member": keepMembers})
 		status, body, err := client.do("PUT", "firewall/addrgrp/"+*group, newMemberJSON)
-		if err != nil || status != 200 {
+		var timeoutErr net.Error
+		putTimedOut := err != nil && errors.As(err, &timeoutErr) && timeoutErr.Timeout()
+		if !putTimedOut && (err != nil || status != 200) {
 			fmt.Fprintf(os.Stderr, "ERROR: failed to update group membership: %s\n", summarizeError(status, body, err))
 			os.Exit(1)
 		}
-		if err := client.verifyGroupRemoval(*group, toDelete); err != nil {
+		if err := client.verifyGroupRemoval(*group, toDelete, keepMembers); err != nil {
+			if putTimedOut {
+				err = fmt.Errorf("PUT timed out after %s; membership could not be confirmed: %w", *writeTimeout, err)
+			}
 			fmt.Fprintf(&out, "\n%s Group membership verification failed: %s\n",
 				failStyle.Render("[FAIL]"), err)
 			fmt.Fprintln(&out, "No address deletions or explicit configuration save were attempted.")
 			fmt.Println(boxWithTitle("Ban expiration", strings.Split(strings.TrimRight(out.String(), "\n"), "\n")...))
 			fmt.Fprintf(os.Stderr, "ERROR: group membership verification failed: %s\n", err)
 			os.Exit(1)
+		}
+		if putTimedOut {
+			fmt.Fprintf(&out, "\n%s Group PUT timed out after %s; read-back confirms expired members were removed.\n",
+				warnStyle.Render("[WARN]"), *writeTimeout)
 		}
 		fmt.Fprintf(&out, "\n%s Group '%s' updated, %d %s removed:\n", okStyle.Render("[OK]"), *group, len(toDelete), plural(len(toDelete), "member", "members"))
 
@@ -607,8 +647,13 @@ func main() {
 	if saveRequested && deleteFailures == 0 {
 		savedCfgSaveMode, saveErr = client.saveConfigIfNeeded()
 		if saveErr != nil {
-			fmt.Fprintf(&out, "\n%s Configuration was changed but could not be persisted: %s\n",
-				failStyle.Render("[FAIL]"), saveErr)
+			if errors.Is(saveErr, errSaveOutcomeUnknown) {
+				fmt.Fprintf(&out, "\n%s Configuration save outcome is unknown; verify persistence on the FortiGate: %s\n",
+					warnStyle.Render("[WARN]"), saveErr)
+			} else {
+				fmt.Fprintf(&out, "\n%s Configuration was changed but could not be persisted: %s\n",
+					failStyle.Render("[FAIL]"), saveErr)
+			}
 		} else if savedCfgSaveMode != "" {
 			fmt.Fprintf(&out, "\n%s Configuration persisted (cfg-save=%s).\n",
 				okStyle.Render("[SAVED]"), savedCfgSaveMode)
@@ -644,7 +689,11 @@ func main() {
 		case deleteFailures > 0:
 			summary = append(summary, "config save:", "skipped (delete failures)")
 		case saveErr != nil:
-			summary = append(summary, "config save:", "failed")
+			if errors.Is(saveErr, errSaveOutcomeUnknown) {
+				summary = append(summary, "config save:", "outcome unknown")
+			} else {
+				summary = append(summary, "config save:", "failed")
+			}
 		case savedCfgSaveMode != "":
 			summary = append(summary, "config save:", fmt.Sprintf("saved (%s)", savedCfgSaveMode))
 		default:

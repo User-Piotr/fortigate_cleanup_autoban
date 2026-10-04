@@ -10,11 +10,16 @@ Entries without an `autoban:` comment (manual blocks) are never touched.
 
 When all members expire, the group update sends an empty array (`member: []`),
 not `null`. After every membership update, the tool reads the group again and
-verifies that the expired entries are no longer members before attempting
-address deletions. If this verification fails, it stops without deleting
-addresses or explicitly saving configuration. The group update may already
+verifies that the expired entries are no longer members and retained entries
+remain in the group before attempting address deletions. If this verification
+fails, it stops without deleting addresses or explicitly saving configuration.
+The group update may already
 have taken effect; the tool does not roll it back. FortiGate API failure
 reports include the numeric `error` code and message/CLI details when present.
+If a group PUT times out after taking effect, the tool reads the group back;
+it proceeds with address deletion only when the expired members are confirmed
+absent. If the read or verification fails, it stops. A timed-out PUT is never
+automatically repeated.
 
 ## Build
 
@@ -110,9 +115,14 @@ $env:FGT_TOKEN | & .\expire_autoban.exe `
 | `-dry-run` | `false` | show what would change |
 | `-save` | `false` | explicitly save the running configuration after successful cleanup when `cfg-save` is `manual` or `revert` |
 | `-save-if-needed` | `false` | compatibility alias for `-save` |
+| `-write-timeout` | `2m` | timeout per group PUT or explicit configuration save POST; GET and DELETE requests retain their 20-second timeout |
 | `-insecure` | `true` | skip TLS verify (self-signed certs) |
 
 Exits `0` on success, `1` on failure. Meant to run daily via cron or Task Scheduler.
+Increase `-write-timeout` if the FortiGate needs longer to process a large
+group update or configuration save. This timeout applies per request, not to
+the whole run. A timeout during the save POST leaves its outcome uncertain;
+check persistence on the FortiGate before retrying.
 
 ## Configuration saving
 
@@ -202,3 +212,4 @@ Omit `-Apply` for a dry-run. Use a full path to `run.ps1` if the project lives
 elsewhere, and run the setup command again if the task account changes.
 Append `-Save` (or `-SaveIfNeeded`) to the scheduled task arguments to explicitly allow
 saving after successful cleanup. It has no effect without `-Apply`.
+The wrapper accepts `-WriteTimeout 3m` and passes it to the executable.

@@ -2,10 +2,13 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 )
+
+var errSaveOutcomeUnknown = errors.New("save request returned no response")
 
 type configGlobal struct {
 	CfgSave string `json:"cfg-save"`
@@ -71,7 +74,10 @@ func (c *apiClient) saveConfigIfNeeded() (string, error) {
 		"system/config/save?vdom=root",
 		[]byte(`{}`),
 	)
-	if err != nil || status < http.StatusOK || status >= http.StatusMultipleChoices {
+	if err != nil {
+		return "", fmt.Errorf("%w: %s", errSaveOutcomeUnknown, summarizeError(status, body, err))
+	}
+	if status < http.StatusOK || status >= http.StatusMultipleChoices {
 		return "", fmt.Errorf("save configuration: %s", summarizeError(status, body, err))
 	}
 
