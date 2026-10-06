@@ -340,23 +340,54 @@ func deleteAddress(c *apiClient, name string) bool {
 	return true
 }
 
+func (c *apiClient) readGroupMembers(group, phase string) ([]groupMember, error) {
+	status, body, err := c.do(http.MethodGet, "firewall/addrgrp/"+group, nil)
+	if err != nil || status != http.StatusOK {
+		return nil, fmt.Errorf("read group %s: %s", phase, summarizeError(status, body, err))
+	}
+	var response addrgrpListResponse
+	if err := json.Unmarshal(body, &response); err != nil {
+		return nil, fmt.Errorf("parse group %s: %w", phase, err)
+	}
+	if len(response.Results) != 1 {
+		return nil, fmt.Errorf("expected one group %s, got %d", phase, len(response.Results))
+	}
+	if response.Results[0].Member == nil {
+		return nil, fmt.Errorf("group member list is missing or null %s", phase)
+	}
+	return response.Results[0].Member, nil
+}
+
+// verifyGroupUnchanged narrows the window where a full PUT could overwrite
+// members added while individual addresses were being classified.
+func (c *apiClient) verifyGroupUnchanged(group string, original []groupMember) error {
+	current, err := c.readGroupMembers(group, "before update")
+	if err != nil {
+		return err
+	}
+	if len(current) != len(original) {
+		return fmt.Errorf("group membership changed during scan (%d -> %d members); rerun cleanup", len(original), len(current))
+	}
+	counts := make(map[string]int, len(original))
+	for _, member := range original {
+		counts[member.Name]++
+	}
+	for _, member := range current {
+		if counts[member.Name] == 0 {
+			return fmt.Errorf("group membership changed during scan (unexpected member %q); rerun cleanup", member.Name)
+		}
+		counts[member.Name]--
+	}
+	return nil
+}
+
 // verifyGroupRemoval checks the actual membership instead of trusting PUT's
 // HTTP status. Missing retained members or remaining expired references stop
 // address deletion and saving.
 func (c *apiClient) verifyGroupRemoval(group string, removed []string, kept []groupMember) error {
-	status, body, err := c.do(http.MethodGet, "firewall/addrgrp/"+group, nil)
-	if err != nil || status != http.StatusOK {
-		return fmt.Errorf("read group after update: %s", summarizeError(status, body, err))
-	}
-	var response addrgrpListResponse
-	if err := json.Unmarshal(body, &response); err != nil {
-		return fmt.Errorf("parse group after update: %w", err)
-	}
-	if len(response.Results) != 1 {
-		return fmt.Errorf("expected one group after update, got %d", len(response.Results))
-	}
-	if response.Results[0].Member == nil {
-		return fmt.Errorf("group member list is missing or null after update")
+	members, err := c.readGroupMembers(group, "after update")
+	if err != nil {
+		return err
 	}
 	removedNames := make(map[string]bool, len(removed))
 	for _, name := range removed {
@@ -364,8 +395,8 @@ func (c *apiClient) verifyGroupRemoval(group string, removed []string, kept []gr
 	}
 	remaining := 0
 	var example string
-	actualNames := make(map[string]bool, len(response.Results[0].Member))
-	for _, member := range response.Results[0].Member {
+	actualNames := make(map[string]bool, len(members))
+	for _, member := range members {
 		actualNames[member.Name] = true
 		if removedNames[member.Name] {
 			remaining++
@@ -616,6 +647,10 @@ func main() {
 
 	deleteFailures := 0
 	if !*dryRun && len(toDelete) > 0 {
+		if err := client.verifyGroupUnchanged(*group, members); err != nil {
+			fmt.Fprintf(os.Stderr, "ERROR: group pre-update check failed: %s\n", err)
+			os.Exit(1)
+		}
 		newMemberJSON, _ := json.Marshal(map[string]any{"member": keepMembers})
 		status, body, err := client.do("PUT", "firewall/addrgrp/"+*group, newMemberJSON)
 		var timeoutErr net.Error
