@@ -50,6 +50,8 @@ func TestCleanupConfigSaving(t *testing.T) {
 		noExpired     bool
 		allExpired    bool
 		ignoreUpdate  bool
+		addMember     bool
+		replaceMember bool
 		delayUpdate   time.Duration
 		delaySave     time.Duration
 		failVerify    bool
@@ -99,6 +101,8 @@ func TestCleanupConfigSaving(t *testing.T) {
 		{name: "mode changes to revert", flags: []string{"-save-if-needed"}, modes: []string{"automatic", "revert"}, wantAfterRead: []string{readMode, update, readGroup, deleteOld, readMode, save}, wantOutput: []string{"saved (revert)"}},
 		{name: "entire group expires", flags: []string{"-save"}, allExpired: true, modes: []string{"manual", "manual"}, wantAfterRead: []string{readMode, update, readGroup, deleteOld, readMode, save}, wantOutput: []string{"[DELETED]", "saved (manual)"}},
 		{name: "PUT does not remove members", flags: []string{"-save"}, allExpired: true, ignoreUpdate: true, modes: []string{"manual"}, wantExit: 1, wantAfterRead: []string{readMode, update, readGroup}, wantOutput: []string{"membership verification failed", "still in group", "No address deletions or explicit configuration save"}},
+		{name: "member added during scan", flags: []string{"-save"}, addMember: true, modes: []string{"manual"}, wantExit: 1, wantAfterRead: []string{readMode, readGroup}, wantOutput: []string{"group pre-update check failed", "group membership changed during scan", "2 -> 3 members"}},
+		{name: "member replaced during scan", flags: []string{"-save"}, replaceMember: true, modes: []string{"manual"}, wantExit: 1, wantAfterRead: []string{readMode, readGroup}, wantOutput: []string{"group pre-update check failed", "unexpected member \"new\""}},
 		{name: "PUT times out after update", flags: []string{"-save", "-write-timeout", "50ms"}, allExpired: true, delayUpdate: 200 * time.Millisecond, modes: []string{"manual", "manual"}, wantAfterRead: []string{readMode, update, readGroup, deleteOld, readMode, save}, wantOutput: []string{"Group PUT timed out", "read-back confirms", "[DELETED]", "[SAVED]"}},
 		{name: "PUT times out without update", flags: []string{"-save", "-write-timeout", "50ms"}, allExpired: true, ignoreUpdate: true, delayUpdate: 200 * time.Millisecond, modes: []string{"manual"}, wantExit: 1, wantAfterRead: []string{readMode, update, readGroup}, wantOutput: []string{"PUT timed out", "still in group", "No address deletions or explicit configuration save"}},
 		{name: "explicit save times out", flags: []string{"-save", "-write-timeout", "50ms"}, modes: []string{"manual", "manual"}, delaySave: 200 * time.Millisecond, wantExit: 1, wantAfterRead: []string{readMode, update, readGroup, deleteOld, readMode, save}, wantOutput: []string{"[DELETED]", "save outcome is unknown", "config save:", "outcome unknown", "context deadline exceeded"}},
@@ -137,19 +141,25 @@ func TestCleanupConfigSaving(t *testing.T) {
 				if request == readGroup {
 					groupReads++
 				}
-				if request == tt.failRequest || (request == readMode && modeReads == tt.failModeRead) || (request == readGroup && groupReads == 2 && tt.failVerify) {
+				if request == tt.failRequest || (request == readMode && modeReads == tt.failModeRead) || (request == readGroup && groupReads == 3 && tt.failVerify) {
 					w.WriteHeader(http.StatusForbidden)
 					_, _ = w.Write([]byte(`{"status":"error"}`))
 					return
 				}
 				switch request {
 				case readGroup:
-					if groupReads == 2 && tt.verifyBody != "" {
+					if groupReads == 3 && tt.verifyBody != "" {
 						_, _ = w.Write([]byte(tt.verifyBody))
 						return
 					}
 					_ = json.NewEncoder(w).Encode(addrgrpListResponse{Results: []addrgrpObject{{Member: groupMembers}}})
 				case readOld:
+					if tt.addMember {
+						groupMembers = append(groupMembers, groupMember{Name: "new"})
+					}
+					if tt.replaceMember {
+						groupMembers[1] = groupMember{Name: "new"}
+					}
 					if tt.oldResponse != "" {
 						_, _ = w.Write([]byte(tt.oldResponse))
 						return
@@ -225,7 +235,12 @@ func TestCleanupConfigSaving(t *testing.T) {
 			if !tt.allExpired {
 				wantRequests = append(wantRequests, readKeep)
 			}
-			wantRequests = append(wantRequests, tt.wantAfterRead...)
+			for _, request := range tt.wantAfterRead {
+				if request == update {
+					wantRequests = append(wantRequests, readGroup) // Pre-update membership check.
+				}
+				wantRequests = append(wantRequests, request)
+			}
 			if !reflect.DeepEqual(gotRequests, wantRequests) {
 				t.Errorf("requests = %v, want %v", gotRequests, wantRequests)
 			}
