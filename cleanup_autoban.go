@@ -51,6 +51,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"strconv"
@@ -331,7 +332,7 @@ func readToken(token string, fromStdin bool, stdin io.Reader) (string, error) {
 }
 
 func deleteAddress(c *apiClient, name string) bool {
-	status, body, err := c.do("DELETE", "firewall/address/"+name, nil)
+	status, body, err := c.do("DELETE", "firewall/address/"+url.PathEscape(name), nil)
 	if err != nil || status != 200 {
 		fmt.Fprintf(&out, "  %s %s -- %s\n", failStyle.Render("[FAIL]"), name, summarizeError(status, body, err))
 		return false
@@ -341,7 +342,7 @@ func deleteAddress(c *apiClient, name string) bool {
 }
 
 func (c *apiClient) readGroupMembers(group, phase string) ([]groupMember, error) {
-	status, body, err := c.do(http.MethodGet, "firewall/addrgrp/"+group, nil)
+	status, body, err := c.do(http.MethodGet, "firewall/addrgrp/"+url.PathEscape(group), nil)
 	if err != nil || status != http.StatusOK {
 		return nil, fmt.Errorf("read group %s: %s", phase, summarizeError(status, body, err))
 	}
@@ -524,7 +525,7 @@ func main() {
 	thresholdSeconds := *days * secondsPerDay
 	now := time.Now().Unix()
 
-	status, body, err := client.do("GET", "firewall/addrgrp/"+*group, nil)
+	status, body, err := client.do("GET", "firewall/addrgrp/"+url.PathEscape(*group), nil)
 	if status == 404 {
 		fmt.Fprintf(os.Stderr, "ERROR: address group '%s' does not exist on %s.\n", *group, *host)
 		if names := groupNames(client); len(names) > 0 {
@@ -561,7 +562,7 @@ func main() {
 	tableLines = append(tableLines, headerStyle.Render(fmt.Sprintf("%-8s %-28s %-8s %s", "DECISION", "NAME", "AGE", "DETAIL")))
 
 	for _, m := range members {
-		status, body, err := client.do("GET", "firewall/address/"+m.Name, nil)
+		status, body, err := client.do("GET", "firewall/address/"+url.PathEscape(m.Name), nil)
 		if err != nil || status != 200 {
 			tableLines = append(tableLines, row(warnStyle, "warn", m.Name, "-", fmt.Sprintf("fetch failed (HTTP %d), left in group", status)))
 			keepMembers = append(keepMembers, m)
@@ -652,7 +653,7 @@ func main() {
 			os.Exit(1)
 		}
 		newMemberJSON, _ := json.Marshal(map[string]any{"member": keepMembers})
-		status, body, err := client.do("PUT", "firewall/addrgrp/"+*group, newMemberJSON)
+		status, body, err := client.do("PUT", "firewall/addrgrp/"+url.PathEscape(*group), newMemberJSON)
 		var timeoutErr net.Error
 		putTimedOut := err != nil && errors.As(err, &timeoutErr) && timeoutErr.Timeout()
 		if !putTimedOut && (err != nil || status != 200) {
