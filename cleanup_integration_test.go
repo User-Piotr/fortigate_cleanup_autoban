@@ -44,6 +44,10 @@ func TestCleanupConfigSaving(t *testing.T) {
 	)
 	tests := []struct {
 		name          string
+		groupName     string
+		groupPath     string
+		oldName       string
+		oldPath       string
 		flags         []string
 		modes         []string
 		oldResponse   string
@@ -63,6 +67,7 @@ func TestCleanupConfigSaving(t *testing.T) {
 		wantOutput    []string
 	}{
 		{name: "flag disabled", wantAfterRead: []string{update, readGroup, deleteOld}, wantOutput: []string{"[DELETED]", "SUMMARY"}},
+		{name: "special characters in object names", groupName: "admin /#?", groupPath: "admin%20%2F%23%3F", oldName: "old /#?", oldPath: "old%20%2F%23%3F", wantOutput: []string{"[DELETED]", "SUMMARY"}},
 		{name: "dry run", flags: []string{"-save-if-needed", "-dry-run"}, modes: []string{"manual"}, wantAfterRead: []string{readMode}, wantOutput: []string{"DRY RUN", "cfg-save:", "manual"}},
 		{name: "save with dry run", flags: []string{"-save", "-dry-run"}, modes: []string{"revert"}, wantAfterRead: []string{readMode}, wantOutput: []string{"DRY RUN", "cfg-save:", "revert"}},
 		{name: "save after dry run", flags: []string{"-dry-run", "-save"}, modes: []string{"manual"}, wantAfterRead: []string{readMode}, wantOutput: []string{"DRY RUN", "cfg-save:", "manual"}},
@@ -119,13 +124,26 @@ func TestCleanupConfigSaving(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			groupName, oldName := "admin-failed-login", "old"
+			readGroupPath, updatePath := readGroup, update
+			readOldPath, deleteOldPath := readOld, deleteOld
+			if tt.groupName != "" {
+				groupName = tt.groupName
+				readGroupPath = "GET /api/v2/cmdb/firewall/addrgrp/" + tt.groupPath
+				updatePath = "PUT /api/v2/cmdb/firewall/addrgrp/" + tt.groupPath
+			}
+			if tt.oldName != "" {
+				oldName = tt.oldName
+				readOldPath = "GET /api/v2/cmdb/firewall/address/" + tt.oldPath
+				deleteOldPath = "DELETE /api/v2/cmdb/firewall/address/" + tt.oldPath
+			}
 			var mu sync.Mutex
 			var requests []string
 			modeReads := 0
 			groupReads := 0
-			groupMembers := []groupMember{{Name: "old"}, {Name: "keep"}}
+			groupMembers := []groupMember{{Name: oldName}, {Name: "keep"}}
 			if tt.allExpired {
-				groupMembers = []groupMember{{Name: "old"}}
+				groupMembers = []groupMember{{Name: oldName}}
 			}
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				mu.Lock()
@@ -138,22 +156,22 @@ func TestCleanupConfigSaving(t *testing.T) {
 				if request == readMode {
 					modeReads++
 				}
-				if request == readGroup {
+				if request == readGroupPath {
 					groupReads++
 				}
-				if request == tt.failRequest || (request == readMode && modeReads == tt.failModeRead) || (request == readGroup && groupReads == 3 && tt.failVerify) {
+				if request == tt.failRequest || (request == readMode && modeReads == tt.failModeRead) || (request == readGroupPath && groupReads == 3 && tt.failVerify) {
 					w.WriteHeader(http.StatusForbidden)
 					_, _ = w.Write([]byte(`{"status":"error"}`))
 					return
 				}
 				switch request {
-				case readGroup:
+				case readGroupPath:
 					if groupReads == 3 && tt.verifyBody != "" {
 						_, _ = w.Write([]byte(tt.verifyBody))
 						return
 					}
 					_ = json.NewEncoder(w).Encode(addrgrpListResponse{Results: []addrgrpObject{{Member: groupMembers}}})
-				case readOld:
+				case readOldPath:
 					if tt.addMember {
 						groupMembers = append(groupMembers, groupMember{Name: "new"})
 					}
@@ -178,7 +196,7 @@ func TestCleanupConfigSaving(t *testing.T) {
 						return
 					}
 					_, _ = fmt.Fprintf(w, `{"results":{"cfg-save":%q}}`, tt.modes[modeReads-1])
-				case update:
+				case updatePath:
 					var body struct {
 						Member []groupMember `json:"member"`
 					}
@@ -203,7 +221,7 @@ func TestCleanupConfigSaving(t *testing.T) {
 						time.Sleep(tt.delaySave)
 					}
 					w.WriteHeader(http.StatusOK)
-				case deleteOld:
+				case deleteOldPath:
 					w.WriteHeader(http.StatusOK)
 				default:
 					t.Errorf("unexpected request %q", request)
@@ -214,7 +232,7 @@ func TestCleanupConfigSaving(t *testing.T) {
 			client := testAPIClient(t, server)
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
-			args := []string{"-test.run=^TestCleanupMainProcess$", "--", "-host", client.host, "-port", fmt.Sprint(client.port), "-token-stdin", "-days", "7"}
+			args := []string{"-test.run=^TestCleanupMainProcess$", "--", "-host", client.host, "-port", fmt.Sprint(client.port), "-token-stdin", "-days", "7", "-group", groupName}
 			cmd := exec.CommandContext(ctx, executable, append(args, tt.flags...)...)
 			cmd.Env = append(os.Environ(), "CLEANUP_AUTOBAN_TEST_MAIN=1")
 			cmd.Stdin = strings.NewReader("test-token\n")
@@ -231,13 +249,17 @@ func TestCleanupConfigSaving(t *testing.T) {
 			mu.Lock()
 			gotRequests := append([]string(nil), requests...)
 			mu.Unlock()
-			wantRequests := []string{readGroup, readOld}
+			wantRequests := []string{readGroupPath, readOldPath}
 			if !tt.allExpired {
 				wantRequests = append(wantRequests, readKeep)
 			}
-			for _, request := range tt.wantAfterRead {
-				if request == update {
-					wantRequests = append(wantRequests, readGroup) // Pre-update membership check.
+			wantAfterRead := tt.wantAfterRead
+			if tt.groupName != "" || tt.oldName != "" {
+				wantAfterRead = []string{updatePath, readGroupPath, deleteOldPath}
+			}
+			for _, request := range wantAfterRead {
+				if request == updatePath {
+					wantRequests = append(wantRequests, readGroupPath) // Pre-update membership check.
 				}
 				wantRequests = append(wantRequests, request)
 			}
